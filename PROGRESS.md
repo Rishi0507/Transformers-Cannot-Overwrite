@@ -46,8 +46,9 @@ The user set these rules on 2026-11-11. They hold for every session.
 - Date: 2026-11-11.
 - Phase: 0 (pilot). The user approved the primary idea on 2026-11-11.
 - Done: repo scaffold, gated attention module, register task, training script, unit tests.
-- Running: two reader sessions writing full-text prior-art notes into `notes/`.
-- Next action: install dependencies, pass the unit tests, run the register sweep on CPU, draft proofs in `theory/`.
+- Interrupted by the usage limit on 2026-11-11: two reader sessions for full-text prior-art notes (`notes/prior_art_mechanisms.md`, `notes/prior_art_interference.md`). Resume them or restart them.
+- Not verified yet: the dependency install was still running when the session stopped, and the unit tests have never run.
+- Next action: confirm the install, run `pytest`, run the register sweep on CPU, draft proofs in `theory/`, finish the prior-art notes.
 
 ## 5. Literature Survey Log
 
