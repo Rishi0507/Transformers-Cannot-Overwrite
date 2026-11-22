@@ -46,9 +46,14 @@ The user set these rules on 2026-11-11. They hold for every session.
 - Date: 2026-11-11.
 - Phase: 0 (pilot). The user approved the primary idea on 2026-11-11.
 - Done: repo scaffold, gated attention module, register task, training script, unit tests.
-- Interrupted by the usage limit on 2026-11-11: two reader sessions for full-text prior-art notes (`notes/prior_art_mechanisms.md`, `notes/prior_art_interference.md`). Resume them or restart them.
-- Not verified yet: the dependency install was still running when the session stopped, and the unit tests have never run.
-- Next action: confirm the install, run `pytest`, run the register sweep on CPU, draft proofs in `theory/`, finish the prior-art notes.
+- Stopped on 2026-11-12 at the user's request. Do not resume until the user says so. Ask before using parallel sessions again.
+- Verified: dependencies installed (torch 2.15.0 CPU), 10 unit tests pass.
+- Drafted, not yet checked by a second reader: `theory/proofs.md` (Theorems 1 to 4, one-layer scope).
+- Sweep v1 (`results/registers/`, 16 of 27 runs, then stopped): plain attention loses accuracy as writes pile up at 8x training length (K=8: 0.99 at one prior write, 0.81 at 17 to 32). Both gate types hold accuracy flat across write counts. Both gate types fail on registers older than the training length, so v1 does not separate scalar from typed gates.
+- Sweep v2 design, not yet built: no positional encoding for gated models (RoPE does not extrapolate), Zipf key frequencies so cold keys must survive many hot-key writes, a vectorized stream generator (the Python loop is the speed bottleneck), saved checkpoints, and a kill-matrix diagnostic `b(write x) . u(write y)`.
+- Prior-art notes in `notes/` are partial. Both reader sessions stopped before finishing.
+- Uncommitted on disk: `theory/`, `results/`, `notes/`, `experiments/summarize_registers.py`, and this tracker update.
+- Next action when the user resumes: commit and push, build sweep v2, finish the prior-art notes inline, get the proofs checked.
 
 ## 5. Literature Survey Log
 
