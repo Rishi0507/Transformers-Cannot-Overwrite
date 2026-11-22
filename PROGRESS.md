@@ -52,8 +52,11 @@ The user set these rules on 2026-11-11. They hold for every session.
 - Sweep v1 (`results/registers/`, 16 of 27 runs, then stopped): plain attention loses accuracy as writes pile up at 8x training length (K=8: 0.99 at one prior write, 0.81 at 17 to 32). Both gate types hold accuracy flat across write counts. Both gate types fail on registers older than the training length, so v1 does not separate scalar from typed gates.
 - Sweep v2 design, not yet built: no positional encoding for gated models (RoPE does not extrapolate), Zipf key frequencies so cold keys must survive many hot-key writes, a vectorized stream generator (the Python loop is the speed bottleneck), saved checkpoints, and a kill-matrix diagnostic `b(write x) . u(write y)`.
 - Prior-art notes in `notes/` are partial. Both reader sessions stopped before finishing.
-- Uncommitted on disk: `theory/`, `results/`, `notes/`, `experiments/summarize_registers.py`, and this tracker update.
-- Next action when the user resumes: commit and push, build sweep v2, finish the prior-art notes inline, get the proofs checked.
+- Sweep v1 count correction: 17 runs finished, not 16. Two seeds per cell, one seed for typed gates at K=32.
+- 2026-11-22: resumed at the user's request. Prof. Enrique Zuazua (FAU) asked for the draft and code on 2026-11-22. He has not committed to co-authoring.
+- 2026-11-22: proofs checked line by line by the same author and revised (log in `theory/proofs.md`, Section 8). No claim failed. Scope corrections: Theorem 1 covers data-independent positional schemes only, and the v1 depth curve confounds write count with age and position.
+- 2026-11-22: draft paper in `paper/main.tex` (not compiled, LaTeX not installed). README rewritten with a five-minute quick start.
+- Next action: user decisions in Section 9, then sweep v2, then an independent proof check.
 
 ## 5. Literature Survey Log
 
@@ -204,6 +207,9 @@ Rules for Tier C:
 
 1. Target venue and deadline?
 2. Can the user create a Kaggle account and share an API token, so free GPU runs can launch from this laptop?
+3. Send Prof. Zuazua a correction to two email claims (positional-encoding scope, v1 confound)?
+4. Author line and title of the draft.
+5. Run the 10 missing v1 runs (about 2.5 CPU hours) before sending, or send with 17?
 
 ## 10. Session Log
 
@@ -211,6 +217,7 @@ Rules for Tier C:
 |------|------|
 | 2026-11-11 | Checked machine. Ran about 45 web searches and abstract reads across agents, continual learning, latent reasoning, attention mechanisms, context rot, reliability theory. Rejected seven candidate ideas as taken. Proposed the primary idea and two backups. Created this tracker. |
 | 2026-11-11 | User approved the primary idea and shared the repo. Built the scaffold: gated attention, register task, training script, tests. Started two reader sessions for full-text prior-art notes. The user asked for commit dates spread back to August. Declined: commits keep real timestamps. |
+| 2026-11-22 | Committed pending work. Checked and revised the proofs. Wrote the draft paper and the paper-data export script. Added output-dir, seed, and key filters to the sweep. Rewrote the README. |
 
 ## 11. Resume Checklist
 
