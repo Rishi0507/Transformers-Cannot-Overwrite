@@ -1,0 +1,268 @@
+\documentclass[10pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{pgfplots}
+\usepgfplotslibrary{groupplots}
+\pgfplotsset{compat=1.18}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{conjecture}{Conjecture}
+\theoremstyle{definition}
+\newtheorem{assumption}{Assumption}
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+
+\definecolor{plain}{HTML}{2A78D6}
+\definecolor{scalar}{HTML}{EB6834}
+\definecolor{typed}{HTML}{1BAF7A}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\shat}{\hat{s}}
+
+\title{How Many Registers Can One Attention Layer Hold?\\ Plain, Scalar-Gated, and Typed-Gated Softmax Attention}
+\author{Draft for discussion. Author list to be decided.}
+\date{22 November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+A transformer context is an append-only log. When a fact changes, the old value stays in context and competes with the new one, and large language models lose the current value as updates pile up. We study this failure as a register problem in a one-layer model. We prove three results. With any data-independent positional scheme, $H$ softmax heads with logits bounded by $B$ give the latest of $c$ writes to a key a worst-case margin of $O(H(B + \ln c)/c)$. A head with a scalar forget gate, as in the Forgetting Transformer, serves at most one register when the number of writes is unbounded. A typed forget gate, in which each write carries a non-negative kill vector and a later write suppresses only earlier writes of the same type, lets one head serve $r$ registers, where $r$ is the gate rank. A fourth result gives a soundness bound for evicting suppressed tokens from the key-value cache. A small pilot experiment agrees with the first result in direction but does not isolate it, and does not separate scalar from typed gates. All results are for one layer. Deep versions are conjectures.
+\end{abstract}
+
+\section{Introduction}
+
+Wang and Sun \cite{pillm} feed language models a stream of key-value updates and ask for the latest value of each key. Accuracy falls about log-linearly in the number of updates per key, for more than 30 models from 0.6B to 637B parameters. An instruction to forget a key gains under 10 points. A fake conversation reset helps more but discards all earlier context. Chattaraj and Raj \cite{rememberfirst} report the same pattern across 39 models. Liu \cite{lengthcheap} finds that filler text barely hurts retrieval, while one rival statement for the same key drops accuracy from 0.97 to 1.00 down to 0.25 to 0.52 across five small models. The psychology literature calls this proactive interference. Older items interfere with recall of newer ones.
+
+We ask a narrower question with a precise answer: how many registers can one attention layer maintain? A register task is a stream of \texttt{write(k,u)}, \texttt{read(k)}, and filler tokens, and the answer to \texttt{read(k)} is the value of the latest earlier \texttt{write(k,$\cdot$)}. The task with one key is flip-flop language modeling \cite{flipflop}. The typed gate we analyze is not a new idea in kind. It is Selective Attention \cite{selective} with a factorized non-negative selection function (Section~\ref{sec:related}). What we add is the capacity theory that separates it from scalar gates, and a soundness bound for eviction.
+
+\paragraph{Contributions.} Section~\ref{sec:plain} bounds the margin of plain attention (Theorem~\ref{thm:plain}), with linear dependence on the logit bound $B$ where the standard dispersion argument gives $e^{2B}$. Section~\ref{sec:scalar} shows that scalar forget gates \cite{fox} need one head per register under unbounded writes (Theorem~\ref{thm:scalar}). Section~\ref{sec:typed} builds one head that holds $r$ registers with typed gates of rank $r$, and shows rank $K$ is necessary for exact service (Theorem~\ref{thm:typed}, Proposition~\ref{prop:rank}). Section~\ref{sec:evict} proves that typed-gate eviction is sound (Theorem~\ref{thm:evict}). Section~\ref{sec:exp} reports a CPU pilot with 17 of 27 planned runs. We make no claim about deep models or about language models. Section~\ref{sec:open} lists what remains open.
+
+\section{Setup and notation}\label{sec:setup}
+
+A stream is $x_1, \dots, x_n$. Keys come from a set of size $K$. A head at reader position $i$ assigns position $j \le i$ the logit $\ell(i,j)$ and weight $\alpha_{ij} = e^{\ell(i,j)} / \sum_{j' \le i} e^{\ell(i,j')}$, and outputs $o_i = \sum_{j \le i} \alpha_{ij} v_j$. Three head types share a content logit $\kappa(i,j)$:
+\begin{align*}
+\text{plain:}\quad & \ell(i,j) = \kappa(i,j),\\
+\text{scalar gate:}\quad & \ell(i,j) = \kappa(i,j) - (D_i - D_j), \quad D_t = \textstyle\sum_{l \le t} \phi(x_l),\ \phi \ge 0,\\
+\text{typed gate:}\quad & \ell(i,j) = \kappa(i,j) - b_j^\top (S_i - S_j), \quad S_t = \textstyle\sum_{l \le t} u_l,\ u_l, b_j \in \R^r_{\ge 0}.
+\end{align*}
+The penalty on $j$ sums the gates emitted at $j+1, \dots, i$. The penalty on $j = i$ is zero. A scalar gate is a typed gate with $r = 1$ and $b_j = 1$.
+
+\begin{assumption}\label{ass}
+(A1) $\kappa(i,j) \in [-B, B]$ for all $j \le i$. (A2) $\|v_j\| \le V$. (A3) The output logits are $z = R(x_i, o^1_i, \dots, o^H_i)$ with $\|z - z'\|_\infty \le \Lambda \sum_h \|o^h_i - o'^h_i\|$ for fixed $x_i$. (A4) $\kappa(i,j)$, $v_j$, and any gate emitted at $j$ depend only on the tokens at $i$ and $j$ and on the positions $i, j$.
+\end{assumption}
+
+(A3) covers the output projection, residual stream, MLP, and unembedding of one layer. (A4) admits absolute, sinusoidal, learned, rotary, ALiBi, and no positional encoding. It excludes schemes whose position signal depends on other tokens, such as CoPE \cite{cope}, PaTH \cite{path}, stick-breaking attention \cite{stickbreaking}, and forget gates themselves. A model is \emph{$\gamma$-correct} on a stream if, at the final read, the correct value's output logit exceeds every other value's logit by at least $\gamma$.
+
+\begin{lemma}[Folding]\label{lem:fold}
+With $\tilde q_i = [q_i, -S_i, 1]$ and $\tilde k_j = [k_j, b_j, b_j^\top S_j]$, $\tilde q_i^\top \tilde k_j = q_i^\top k_j - b_j^\top (S_i - S_j)$.
+\end{lemma}
+
+A typed-gate head is therefore a dot-product head on augmented vectors and runs on any fused attention kernel at extra cost $O(nr)$. The repository checks Lemma~\ref{lem:fold} numerically.
+
+\section{Plain attention cannot isolate the latest write}\label{sec:plain}
+
+\begin{theorem}\label{thm:plain}
+Take a one-layer model with $H$ plain heads under Assumption~\ref{ass}. Fix a key $k$, values $v \ne v'$, a reader position $i$, $c \ge 2$, and positions $q_1 < \dots < q_c < j_1 < \dots < j_c < i$. Some two streams, each with exactly $c$ writes to $k$ and identical except for the value of the latest write, cannot both be $\gamma$-correct unless
+\[
+\gamma \le \frac{4 \Lambda V H (2B + \ln c)}{c - 1}.
+\]
+\end{theorem}
+
+\begin{proof}
+\emph{Ladder.} For $P = (p_1, \dots, p_c) \in \{v, v'\}^c$ and $t \in \{2, \dots, c\}$, let $C_t(P)$ hold \texttt{write(k,$p_m$)} at $j_m$ for $m \le t$, padding writes \texttt{write(k,$v$)} at $q_{t+1}, \dots, q_c$, \texttt{read(k)} at $i$, and fixed fillers elsewhere. It has exactly $c$ writes to $k$, and the latest sits at $j_t$.
+
+\emph{Telescoping.} Fix a head. By (A4) the unnormalized weight of \texttt{write(k,$u$)} at $j_m$ is a number $a_m(u) \in [e^{-B}, e^{B}]$ that does not depend on the rest of the stream. Let $A_t(P) = \sum_{m \le t} a_m(p_m)$ and $\shat_t(P) = a_t(p_t)/A_t(P)$. Other tokens only enlarge the denominator, so the attention on $j_t$ in $C_t(P)$ is at most $\shat_t(P)$. Since $1 - \shat_t = A_{t-1}/A_t$, we get $\prod_{t=2}^{c} (1 - \shat_t) = A_1/A_c \ge e^{-2B}/c$, and with $-\ln(1-s) \ge s$,
+\begin{equation}\label{eq:tele}
+\textstyle\sum_{t=2}^{c} \shat_t(P) \le 2B + \ln c \quad \text{for every } P.
+\end{equation}
+
+\emph{Flip and average.} Let $P^{(t)}$ flip coordinate $t$ of $P$. The padding depends only on $t$, so $C_t(P^{(t)})$ is $C_t(P)$ with the latest value flipped, and the two streams have different answers. For $P$ uniform, $P \mapsto P^{(t)}$ is a bijection, so by \eqref{eq:tele} $\mathbb{E}_P \sum_t [\shat_t(P) + \shat_t(P^{(t)})] \le 2(2B + \ln c)$ per head. Summing over heads and dividing by the $c - 1$ rungs, some $P$ and $t$ satisfy $\sum_h (s_h + s'_h) \le 2H(2B + \ln c)/(c-1)$, where $s_h, s'_h$ are head $h$'s attention on $j_t$ in the two streams.
+
+\emph{Outputs.} Write head $h$'s output as $(1 - s) o_{\mathrm{rest}} + s w$, with $w$ the value at $j_t$. The streams agree elsewhere, so by (A4) $o_{\mathrm{rest}}$ is the same in both, and $\|o - o'\| \le |s - s'| V + sV + s'V \le 2V(s_h + s'_h)$. By (A3), $\|z - z'\|_\infty \le 4 \Lambda V H (2B + \ln c)/(c-1)$.
+
+\emph{Margin.} If both streams were $\gamma$-correct, $z_v - z_{v'} \ge \gamma$ and $z'_{v'} - z'_v \ge \gamma$. Adding gives $2\gamma \le 2\|z - z'\|_\infty$.
+\end{proof}
+
+\begin{remark}
+The bound does not involve $n$. Fillers cannot help, and only tokens the head weights like the target compete. For bounded logits, the standard dispersion argument \cite{softmaxnotenough} gives attention at most $e^{2B}/c$ on any one of $c$ competitors. Theorem~\ref{thm:plain} trades $e^{2B}$ for $2B + \ln c$ at the price of holding for some stream rather than every stream. We do not know whether the rate is tight. A linear recency profile puts attention of order $B/c$ on the latest write, but its remaining mass can sit on older writes that all disagree, so it does not reach the margin bound.
+\end{remark}
+
+\section{A scalar forget gate serves one register per head}\label{sec:scalar}
+
+\begin{theorem}\label{thm:scalar}
+Take a one-layer model with $H$ scalar-gate heads under Assumption~\ref{ass}, where each gate $\phi_h$ depends on the token only. If the model is $\gamma^*$-correct on every register stream over $K$ keys, with no bound on length or write count, then $K \le H$.
+\end{theorem}
+
+\begin{proof}
+Let $\varepsilon_0 = \min(1, \gamma^*/(10\Lambda V H))$. Let $F_h$ be the set of keys $y$ such that some value $u$ has $\phi_h(\texttt{write(y,u)}) \ge \varepsilon_0$, and say head $h$ \emph{serves} $x$ if $F_h = \{x\}$. Suppose no head serves $x$. Then each head is type 1 ($x \notin F_h$) or type 2 (some $y_h \ne x$ and $u_h$ with $\phi_h(\texttt{write($y_h$,$u_h$)}) \ge \varepsilon_0$).
+
+\emph{Stream.} Use the ladder of Theorem~\ref{thm:plain} on $c$ consecutive positions with no padding, followed by one block of $c' = c$ copies of \texttt{write($y_h$,$u_h$)} per type-2 head, then \texttt{read(x)}. The length is $n \le (H+1)c + 1$.
+
+\emph{Type-2 heads.} Every token at or before $j_c$ has penalty at least $c\varepsilon_0$, and the reader's own weight is at least $e^{-B}$, so those tokens carry total attention at most $n e^{2B - c\varepsilon_0}$. A flip at $j_t$ leaves every weight and value after $j_c$ unchanged, so the head output moves by at most $4Vn e^{2B - c\varepsilon_0}$.
+
+\emph{Type-1 heads.} Let $g_l = \phi_h(\texttt{write(x,$p_l$)}) \in [0, \varepsilon_0)$. Tokens after $j_t$ penalize all ladder writes equally, so with $\tilde a_m = \exp(\kappa_m(p_m) - \sum_{l=m+1}^{t} g_l)$, $\tilde A_t = \sum_{m \le t} \tilde a_m$, and $\shat_t = \tilde a_t / \tilde A_t$, the attention on $j_t$ is at most $\shat_t$, and $1 - \shat_t = e^{-g_t} \tilde A_{t-1}/\tilde A_t$. The product over $t$ is at least $e^{-2B - (c-1)\varepsilon_0}/c$, so $\sum_t \shat_t \le 2B + \ln c + (c-1)\varepsilon_0$. The flip and averaging steps carry over. In the output step, the flip changes $g_t$ by less than $\varepsilon_0$, which rescales all weights before $j_t$ by a common factor $\rho \in (e^{-\varepsilon_0}, e^{\varepsilon_0})$. If a subset of a softmax average has mass $p$ and its weights are scaled by $\rho$, its new mass $p'$ satisfies $|p' - p| = p(1-p)|\rho - 1|/(\rho p + 1 - p) \le (e^{\varepsilon_0} - 1)/4$, so $\|o_{\mathrm{rest}} - o'_{\mathrm{rest}}\| \le V(e^{\varepsilon_0} - 1)/2 \le V\varepsilon_0$ and $\|o - o'\| \le 2V(s + s') + V\varepsilon_0$.
+
+\emph{Combining.} Some pair of streams with different answers has
+\[
+\|z - z'\|_\infty \le \Lambda \Big[ \tfrac{4VH(2B + \ln c)}{c-1} + 5VH\varepsilon_0 + 4VHn e^{2B - c\varepsilon_0} \Big].
+\]
+The middle term is at most $\gamma^*/2$. For $c$ large the first and last terms are each below $\gamma^*/4$, so $\|z - z'\|_\infty < \gamma^*$, which contradicts $\gamma^*$-correctness as in Theorem~\ref{thm:plain}. So every key is served by some head, and a head serves at most one key.
+\end{proof}
+
+A scalar gate forgets by age. To resolve rewrites of $x$, a head must forget on writes to $x$, and that forgetting also hits live values of other keys. Content logits absorb at most $2B$ of penalty, so a second key survives about $2B/\varepsilon_0$ rewrites. With bounded write counts one head can serve several keys. The theorem concerns the unbounded regime.
+
+\section{A typed forget gate serves $r$ registers}\label{sec:typed}
+
+\begin{theorem}\label{thm:typed}
+Let $K \le r$, $n \ge 1$, and $0 < \delta < 1/4$. One typed-gate head with $|\kappa| \le \frac12 \ln(n/\delta)$, gate entries in $\{0, \ln(1 + 1/\delta)\}$, and identity readout is $(1 - 4\delta)$-correct on every register stream of length at most $n$, for any number of writes.
+\end{theorem}
+
+\begin{proof}
+Let $\theta = \ln(1 + 1/\delta)$ and $\beta = \frac12 \ln(n/\delta)$. Writes to key $k$ emit $u = \theta e_k$ and carry $b = e_k$. Reads and fillers emit $u = 0$ and carry $b = 0$. Set $\kappa = \beta$ between \texttt{read(k)} and any \texttt{write(k,$\cdot$)} and $\kappa = -\beta$ otherwise. This is a dot product with $k(\texttt{write(k',$\cdot$)}) = e_{k'}$, $k(\text{read or filler}) = e_0$, and $q(\texttt{read(k)}) = 2\beta e_k - \beta(e_0 + \sum_{k'} e_{k'})$. Values are one-hot, $v(\texttt{write(k,u)}) = e_u$, and $v = 0$ otherwise.
+
+At \texttt{read(k)}, the latest write to $k$ has penalty $0$ and logit $\beta$. A write to $k$ followed by $m$ later writes to $k$ has penalty $m\theta$, since no other token adds to coordinate $k$. All other positions have logit at most $-\beta$. The attention on the latest write is at least
+\[
+\Big(1 + \textstyle\sum_{m \ge 1} e^{-m\theta} + n e^{-2\beta}\Big)^{-1} = \big(1 + \tfrac{1}{e^\theta - 1} + n e^{-2\beta}\big)^{-1} = \tfrac{1}{1 + 2\delta} \ge 1 - 2\delta.
+\]
+The correct output coordinate is at least $1 - 2\delta$ and every other coordinate is at most $2\delta$.
+\end{proof}
+
+Theorem~\ref{thm:plain} does not apply because the penalty depends on the tokens between $j$ and $i$, which violates (A4). The content logits stay at $\frac12\ln(n/\delta)$, the same cost plain attention pays to ignore $n$ unrelated tokens. The gate supplies the unbounded logit range that Theorem~\ref{thm:plain} denies to plain heads, and it applies that range only to stale writes. Capacity per layer is $Hr$ registers against $H$ for scalar gates. Trained models use softplus gates without exact zeros. A gate bias of $-\ln(n/\delta)$ should bound the leakage, but we have not proved this variant in full.
+
+\begin{proposition}\label{prop:rank}
+If non-negative $u_x, b_x \in \R^r$ satisfy $b_x^\top u_x > 0$ for every key $x$ and $b_x^\top u_y = 0$ for $x \ne y$, then $r \ge K$.
+\end{proposition}
+
+\begin{proof}
+Pick $i_x$ in the support of both $u_x$ and $b_x$. For $y \ne x$, $b_y^\top u_x = 0$ with non-negative entries puts $i_x$ outside the support of $b_y$, which contains $i_y$. So the $i_x$ are distinct.
+\end{proof}
+
+Proposition~\ref{prop:rank} covers exact zero cross-talk only. Packing $K > r$ keys with small overlaps under a bounded number of interleaved writes is Conjecture~\ref{conj:pack}.
+
+\section{Sound selective eviction}\label{sec:evict}
+
+\begin{theorem}\label{thm:evict}
+In a typed-gate head under (A1) and (A2), the penalty $\pi_j(i) = b_j^\top (S_i - S_j)$ is non-decreasing in $i$. If each $j$ in a set $E$ is evicted at time $t_j$ and $\sum_{j \in E} e^{2B - \pi_j(t_j)} \le \varepsilon$, then at every reader $i \ge \max_{j \in E} t_j$ the output with $E$ removed is within $2V\varepsilon$ of the exact output.
+\end{theorem}
+
+\begin{proof}
+$S_i - S_j$ is a sum of non-negative vectors that grows with $i$, and $b_j \ge 0$. For $i \ge t_j$, the weight of $j$ is at most $e^{B - \pi_j(t_j)}$ and the reader's own weight is at least $e^{-B}$, so $\alpha_{ij} \le e^{2B - \pi_j(t_j)}$ and the evicted mass $\alpha_E$ is at most $\varepsilon$. The exact output is $(1 - \alpha_E) o_{\mathrm{keep}} + \alpha_E o_E$, so it differs from $o_{\mathrm{keep}}$ by at most $2V\alpha_E$.
+\end{proof}
+
+Under a scalar gate, penalties are ordered by age, so a threshold test evicts a prefix of the cache. A typed gate can evict a newer stale token and keep an older live one. The bound is per head and per layer.
+
+\section{Pilot experiment}\label{sec:exp}
+
+\paragraph{Setup.} One-layer transformers with two heads, width 64, and about 52K to 56K parameters, with plain, scalar-gate, or typed-gate (rank 8) attention. All models use rotary position encoding. Streams draw each token as a write, read, or filler with probabilities 0.3, 0.3, 0.4, a key uniform over $K \in \{2, 8, 32\}$, and a value uniform over 16. Training uses lengths 64 to 128, 4000 AdamW steps at learning rate $2\times10^{-3}$, batch 64, and no tuning for any model. Tests use lengths 128 to 1024 with 512 streams per length. The plan was 3 seeds for each of 9 cells. We stopped after 17 runs: 2 seeds per cell, except one seed for typed gates at $K = 32$. The repository holds every log, and a script generates every number and figure below.
+
+\begin{table}[t]
+\centering\small
+\input{table_acc.tex}
+\caption{Read accuracy by test length $T$ (training length at most 128). Mean over seeds, with (min, max) in parentheses.}
+\label{tab:acc}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1, horizontal sep=1.4cm},
+  width=0.49\linewidth, height=5.2cm,
+  xtick={0,...,6}, xticklabels={1,2,3--4,5--8,9--16,17--32,33--64},
+  xticklabel style={font=\scriptsize, rotate=35, anchor=north east},
+  yticklabel style={font=\scriptsize},
+  restrict x to domain=0:6,
+  ymin=0.5, ymax=1.03, ymajorgrids, grid style={black!12},
+  xlabel={writes $c$ to the read key so far}, xlabel style={font=\small},
+  legend style={font=\scriptsize, at={(0.03,0.03)}, anchor=south west, draw=none, fill=white, fill opacity=0.8, text opacity=1},
+  every axis plot/.append style={thick, mark size=2pt, error bars/error bar style={thin}},
+]
+\nextgroupplot[title={\small $K = 8$}, ylabel={read accuracy}]
+\addplot[color=plain, mark=*, solid, error bars/.cd, y dir=both, y explicit] table[x=x, y=mean, y error plus=eplus, y error minus=eminus] {data/depth_k8_none.dat};
+\addplot[color=scalar, mark=square*, dashed, error bars/.cd, y dir=both, y explicit] table[x=x, y=mean, y error plus=eplus, y error minus=eminus] {data/depth_k8_scalar.dat};
+\addplot[color=typed, mark=triangle*, densely dotted, error bars/.cd, y dir=both, y explicit] table[x=x, y=mean, y error plus=eplus, y error minus=eminus] {data/depth_k8_typed.dat};
+\legend{plain, scalar gate, typed gate}
+\nextgroupplot[title={\small $K = 32$}]
+\addplot[color=plain, mark=*, solid, error bars/.cd, y dir=both, y explicit] table[x=x, y=mean, y error plus=eplus, y error minus=eminus] {data/depth_k32_none.dat};
+\addplot[color=scalar, mark=square*, dashed, error bars/.cd, y dir=both, y explicit] table[x=x, y=mean, y error plus=eplus, y error minus=eminus] {data/depth_k32_scalar.dat};
+\addplot[color=typed, mark=triangle*, densely dotted, error bars/.cd, y dir=both, y explicit] table[x=x, y=mean, y error plus=eplus, y error minus=eminus] {data/depth_k32_typed.dat};
+\end{groupplot}
+\end{tikzpicture}
+\caption{Read accuracy at $T = 1024$ (8 times the training length) against the number of writes to the read key so far. Bars span the seeds (typed gate at $K = 32$: one seed). The bucket $c \ge 65$ is omitted: it holds reads from one seed only, and the logs do not record bucket sizes.}
+\label{fig:depth}
+\end{figure}
+
+\begin{table}[t]
+\centering\small
+\input{table_age.tex}
+\caption{Read accuracy at $T = 1024$ against the age of the latest write to the read key, in tokens. Mean over seeds. Training streams were at most 128 tokens long.}
+\label{tab:age}
+\end{table}
+
+\paragraph{Results.} At $K = 8$ and $T = 1024$, plain attention falls from 0.992 with one write to 0.806 with 17 to 32 writes (Figure~\ref{fig:depth}), while both gated models stay between 0.995 and 0.999 for every $c \le 64$. At $K = 32$ no model is flat. All three lose accuracy at long test lengths (Table~\ref{tab:acc}), and the gated models do worse at small $c$, because at $K = 32$ a read with few prior writes usually has an old latest write. Table~\ref{tab:age} shows that every model fails once the latest write is older than the training length: at $K = 8$, plain attention scores 0.104, the scalar gate 0.472, and the typed gate 0.587 at ages 129 to 512.
+
+\paragraph{What the pilot does and does not show.}
+\begin{itemize}
+\item The direction matches Theorem~\ref{thm:plain}: at $K = 8$ plain attention degrades with the write count and gated attention does not. The pilot does not isolate the write count. In these streams $c$ correlates with the position of the read, which exceeds the training length for most large-$c$ reads, and with the age of the latest write. Plain attention fails at ages 33 to 128 even at $K = 2$ (0.398), where competitors are few. Rotary encoding beyond the training length is a likely confound.
+\item The pilot does not separate scalar from typed gates. Theorem~\ref{thm:scalar} concerns unbounded write counts, and at $K = 8$ a key receives about 40 writes in a 1024-token stream on average. At $K = 32$ the typed gate leads by 4.4 points at $T = 1024$, from a single seed.
+\item Limits: 17 of 27 runs, two seeds at most where the project standard is three, no per-bucket read counts, no saved checkpoints, one layer, and rotary encoding in the gated models.
+\end{itemize}
+A second sweep is designed but not built: no positional encoding for gated models, Zipf key frequencies so rare keys must survive many writes to frequent keys, streams that fix age and position while varying $c$, saved checkpoints, and a diagnostic of the learned kill matrix $b(\text{write } x)^\top u(\text{write } y)$.
+
+\section{Related work}\label{sec:related}
+
+We grade each source by how we read it. \textbf{F}: full text read. \textbf{P}: parts of the text read, or only the defining formula checked. \textbf{S}: search summary or abstract only. Grades below F carry a flag until upgraded.
+
+\paragraph{Proactive interference in language models.} PI-LLM [F] \cite{pillm} introduced the update-stream benchmark and found that prompt interventions fail. Chattaraj and Raj [F] \cite{rememberfirst} extend it to 39 models. Liu [F] \cite{lengthcheap} separates length from competition and reports no universal law. SleepGate [F] \cite{sleepgate} proposes a fix and tests it on a 793K-parameter model. Ghaffari et al.\ [P] \cite{poisoning} bound evidence margins with extreme-value statistics. None of these gives a capacity result for attention with gates.
+
+\paragraph{Gates and data-dependent position.} The Forgetting Transformer [F] \cite{fox} adds a scalar forget gate per head, and its follow-up [F] \cite{acp} prunes the cache using the gate. Selective Attention [F] \cite{selective} is the closest mechanism. A token $k$ masks an earlier token $j$ by $\mathrm{ReLU}$ of a head-0 logit, and the masks accumulate as $F_{ij} = \sum_{k < i} S_{kj}$. It already shows content-selective, monotone suppression, solves a variable-assignment overwrite task, and prunes the cache by $F$ without an error bound. A typed gate is the case $S_{kj} = b_j^\top u_k$ with $b_j, u_k \ge 0$, a separate penalty per head, and the reader's own gate included. The factorization makes the sum over $k$ separable, so the penalty costs $O(nr)$ memory and folds into standard kernels (Lemma~\ref{lem:fold}). CoPE [P] \cite{cope}, PaTH [P] \cite{path}, and stick-breaking attention [P] \cite{stickbreaking} make position depend on content. Our contribution is the capacity analysis and the eviction bound, not the idea of a token suppressing earlier tokens.
+
+\paragraph{Theory of softmax attention.} Flip-flop language modeling [F] \cite{flipflop} exposed sporadic failures of attention on the one-key register task. Veli\v{c}kovi\'c et al.\ [S] \cite{softmaxnotenough} prove that bounded-logit softmax disperses as inputs grow. Yang et al.\ [S] \cite{hardsoft} show that soft attention simulates hard attention when temperature scales with the score gap. Theorem~\ref{thm:plain} is a dispersion result specialized to latest-of-$c$ retrieval, with linear rather than exponential dependence on $B$.
+
+\paragraph{Interacting particles.} Geshkovski et al.\ [S] \cite{glpr} model attention as a system of interacting particles and prove that tokens cluster. Alcalde, Fantuzzi, and Zuazua [S] \cite{afz} prove that pure-attention hardmax transformers converge to clusters determined by leader tokens. Two links to our results are exact. First, Theorem~\ref{thm:plain} rests on (A4), which says the interaction weight between the reader and token $j$ depends on that pair alone. This is the pairwise structure of the interaction kernel in these models. A typed gate breaks it: the factor $e^{-b_j^\top (S_i - S_j)}$ depends on every token between $j$ and $i$. Second, the bound grows linearly in $B$ and becomes vacuous in the hardmax limit, where a head with a strict recency preference picks the latest write. Theorem~\ref{thm:typed} reaches selection with bounded content logits by letting the gate penalty grow on stale tokens alone. Whether the clustering results extend to causal, non-pairwise interactions of this kind is open, and we make no claim that the latest write acts as a leader in the sense of \cite{afz}.
+
+\section{Open problems}\label{sec:open}
+
+\begin{conjecture}[Deep plain models]
+For $L$ layers of plain attention under (A1) to (A3) with bounded content logits, the margin for the latest of $c$ writes decays to zero as $c$ grows, at a rate depending on $L$, $H$, and $B$.
+\end{conjecture}
+The one-layer argument fails in depth because later layers can mark stale tokens. Lower bounds for deep transformers are a known hard problem.
+
+\begin{conjecture}[Deep scalar gates]
+An $L$-layer model with $H$ scalar-gate heads per layer serves at most $LH$ registers under unbounded writes.
+\end{conjecture}
+
+\begin{conjecture}[Packing]\label{conj:pack}
+With positive random features of rank $r$, a typed-gate head serves $K > r$ registers when the number of interleaved writes between reads is bounded, with $K$ growing faster than $r$.
+\end{conjecture}
+
+Other open questions: whether Theorem~\ref{thm:plain} is tight in $c$; a leakage bound for softplus gates; an end-to-end version of Theorem~\ref{thm:evict}; and whether a retrofit of typed gates into a pretrained language model removes proactive interference on PI-LLM. The theorems are one-layer results checked only by the author so far. They need an independent reader.
+
+\begin{thebibliography}{99}\small
+\bibitem{pillm} C.~Wang and J.~V.~Sun. Unable to forget: Proactive interference reveals working memory limits in LLMs beyond context length. ICML 2025 Workshop on Long Context Foundation Models. arXiv:2506.08184.
+\bibitem{rememberfirst} S.~Chattaraj and K.~Raj. LLMs remember first, forget last: Dual-process interference in large language models. arXiv:2603.00270, 2026.
+\bibitem{lengthcheap} Y.~Liu. Length is cheap, competition is not: Attention predicts context rot in retrieval. arXiv:2611.04169, 2026.
+\bibitem{sleepgate} Y.~Xie. Learning to forget: Sleep-inspired memory consolidation for resolving proactive interference in large language models. arXiv:2603.14517, 2026.
+\bibitem{poisoning} M.~Ghaffari, N.~Fatehi, B.~Sen, N.~Sabetpour, and C.~Morato. Context poisoning as extreme-value attention interference in long-context language models. arXiv:2609.22101, 2026.
+\bibitem{flipflop} B.~Liu, J.~T.~Ash, S.~Goel, A.~Krishnamurthy, and C.~Zhang. Exposing attention glitches with flip-flop language modeling. NeurIPS 2023. arXiv:2306.00946.
+\bibitem{fox} Z.~Lin, E.~Nikishin, X.~O.~He, and A.~Courville. Forgetting Transformer: Softmax attention with a forget gate. ICLR 2025. arXiv:2503.02130.
+\bibitem{acp} Z.~Lin, J.~Obando-Ceron, X.~O.~He, and A.~Courville. Adaptive computation pruning for the Forgetting Transformer. COLM 2025. arXiv:2504.06949.
+\bibitem{selective} Y.~Leviathan, M.~Kalman, and Y.~Matias. Selective attention improves transformer. arXiv:2410.02703, 2024.
+\bibitem{cope} O.~Golovneva, T.~Wang, J.~Weston, and S.~Sukhbaatar. Contextual position encoding: Learning to count what's important. arXiv:2405.18719, 2024.
+\bibitem{path} S.~Yang, Y.~Shen, K.~Wen, S.~Tan, M.~Mishra, L.~Ren, R.~Panda, and Y.~Kim. PaTH attention: Position encoding via accumulating Householder transformations. arXiv:2505.16381, 2025.
+\bibitem{stickbreaking} S.~Tan, S.~Yang, A.~Courville, R.~Panda, and Y.~Shen. Scaling stick-breaking attention: An efficient implementation and in-depth study. ICLR 2025. arXiv:2410.17980.
+\bibitem{softmaxnotenough} P.~Veli\v{c}kovi\'c, C.~Perivolaropoulos, F.~Barbero, and R.~Pascanu. Softmax is not enough (for sharp size generalisation). arXiv:2410.01104, 2024.
+\bibitem{hardsoft} A.~Yang, L.~Strobl, D.~Chiang, and D.~Angluin. Simulating hard attention using soft attention. TACL 14:147--166, 2026. arXiv:2412.09925.
+\bibitem{glpr} B.~Geshkovski, C.~Letrouit, Y.~Polyanskiy, and P.~Rigollet. A mathematical perspective on Transformers. arXiv:2312.10794.
+\bibitem{afz} A.~Alcalde, G.~Fantuzzi, and E.~Zuazua. Clustering in pure-attention hardmax transformers and its role in sentiment analysis. SIAM J.\ Math.\ Data Sci.\ 7(3), 2025. arXiv:2407.01602.
+\end{thebibliography}
+
+\end{document}
